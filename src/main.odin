@@ -3,10 +3,12 @@ package src
 import "base:intrinsics"
 import "core:fmt"
 import glm "core:math/linalg/glsl"
+import "core:mem"
 import "core:os"
 import gl "vendor:OpenGL"
 import gltf "vendor:cgltf"
 import glfw "vendor:glfw"
+import stbi "vendor:stb/image"
 
 window: glfw.WindowHandle
 shader: u32
@@ -44,12 +46,17 @@ Skin :: struct {
 	joint_node_idxs:       [dynamic]i32,
 }
 
+Material :: struct {
+	base_color_factor: glm.vec4,
+}
+
 Primitive :: struct {
-	vao:      u32,
-	vbo:      u32,
-	ebo:      u32,
-	vertices: [dynamic]Vertex,
-	indices:  [dynamic]u32,
+	vao:          u32,
+	vbo:          u32,
+	ebo:          u32,
+	vertices:     [dynamic]Vertex,
+	indices:      [dynamic]u32,
+	material_idx: i32,
 }
 
 Mesh :: struct {
@@ -90,6 +97,7 @@ Model :: struct {
 	meshes:         [dynamic]Mesh,
 	nodes:          [dynamic]Node,
 	skins:          [dynamic]Skin,
+	materials:      [dynamic]Material,
 	animations:     [dynamic]Animation,
 	root_node_idxs: [dynamic]i32,
 }
@@ -248,7 +256,15 @@ load_model :: proc(file_path: cstring) -> Model {
 				)
 			}
 
-			append(&primitives, Primitive{vertices = vertices, indices = indices})
+			material_idx: i32 = -1
+			if primitive.material != nil {
+				material_idx = i32(gltf.material_index(data, primitive.material))
+			}
+
+			append(
+				&primitives,
+				Primitive{vertices = vertices, indices = indices, material_idx = material_idx},
+			)
 
 			delete(positions_flat)
 			delete(normals_flat)
@@ -257,6 +273,15 @@ load_model :: proc(file_path: cstring) -> Model {
 		}
 
 		append(&meshes, Mesh{primitives = primitives})
+	}
+
+	// -------------------------------------------------------------------
+	// Load materials
+	materials := make([dynamic]Material)
+	for material in data.materials {
+		pbr := material.pbr_metallic_roughness
+		base_color_factor: glm.vec4 = pbr.base_color_factor
+		append(&materials, Material{base_color_factor = base_color_factor})
 	}
 
 	// -------------------------------------------------------------------
@@ -404,6 +429,7 @@ load_model :: proc(file_path: cstring) -> Model {
 		meshes = meshes,
 		nodes = nodes,
 		skins = skins,
+		materials = materials,
 		animations = animations,
 		root_node_idxs = root_node_idxs,
 	}
@@ -755,14 +781,30 @@ draw_node :: proc(node: ^Node, model: ^Model) {
 
 		mesh := model.meshes[node.mesh_idx]
 		for &primitive in mesh.primitives {
-			draw_primitive(&primitive)
+			base_color_factor := glm.vec4{1.0, 1.0, 1.0, 1.0}
+
+			if primitive.material_idx != -1 {
+				material := &model.materials[primitive.material_idx]
+				base_color_factor = material.base_color_factor
+			}
+
+			gl.Uniform4f(
+				gl.GetUniformLocation(shader, "u_base_color_factor"),
+				base_color_factor.r,
+				base_color_factor.g,
+				base_color_factor.b,
+				base_color_factor.a,
+			)
+
+			gl.BindVertexArray(primitive.vao)
+			gl.DrawElements(
+				gl.TRIANGLES,
+				i32(len(primitive.indices)),
+				gl.UNSIGNED_INT,
+				rawptr(uintptr(0)),
+			)
 		}
 	}
-}
-
-draw_primitive :: proc(primitive: ^Primitive) {
-	gl.BindVertexArray(primitive.vao)
-	gl.DrawElements(gl.TRIANGLES, i32(len(primitive.indices)), gl.UNSIGNED_INT, rawptr(uintptr(0)))
 }
 
 set_mat4_uniform :: proc(mat: ^glm.mat4, name: cstring) {
