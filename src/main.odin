@@ -1,9 +1,10 @@
-package src
+package main
 
 import "base:intrinsics"
 import "core:fmt"
 import glm "core:math/linalg/glsl"
 import "core:mem"
+import vmem "core:mem/virtual"
 import "core:os"
 import gl "vendor:OpenGL"
 import gltf "vendor:cgltf"
@@ -100,9 +101,16 @@ Model :: struct {
 	materials:      [dynamic]Material,
 	animations:     [dynamic]Animation,
 	root_node_idxs: [dynamic]i32,
+	arena:          vmem.Arena,
 }
 
 load_model :: proc(file_path: cstring) -> Model {
+	arena: vmem.Arena
+	arena_err := vmem.arena_init_growing(&arena)
+	ensure(arena_err == nil)
+	allocator := vmem.arena_allocator(&arena)
+	context.allocator = allocator
+
 	model: Model = {}
 
 	options := gltf.options{}
@@ -111,6 +119,7 @@ load_model :: proc(file_path: cstring) -> Model {
 		fmt.eprintf("Failed to parse gltf file: %v\n", file_path)
 		os.exit(1)
 	}
+	defer gltf.free(data)
 
 	status = gltf.load_buffers(options, data, file_path)
 	if status != .success {
@@ -432,6 +441,7 @@ load_model :: proc(file_path: cstring) -> Model {
 		materials = materials,
 		animations = animations,
 		root_node_idxs = root_node_idxs,
+		arena = arena,
 	}
 }
 
@@ -683,26 +693,6 @@ sync_primitive :: proc(primitive: ^Primitive) {
 	gl.BindBuffer(gl.ELEMENT_ARRAY_BUFFER, 0)
 }
 
-unload_primitive :: proc(primitive: ^Primitive) {
-	if primitive.vao != 0 {
-		gl.DeleteVertexArrays(1, &primitive.vao)
-		primitive.vao = 0
-	}
-
-	if primitive.vbo != 0 {
-		gl.DeleteBuffers(1, &primitive.vbo)
-		primitive.vbo = 0
-	}
-
-	if primitive.ebo != 0 {
-		gl.DeleteBuffers(1, &primitive.ebo)
-		primitive.ebo = 0
-	}
-
-	delete(primitive.vertices)
-	delete(primitive.indices)
-}
-
 sync_model :: proc(model: ^Model) {
 	for &mesh in model.meshes {
 		for &primitive in mesh.primitives {
@@ -716,9 +706,31 @@ sync_model :: proc(model: ^Model) {
 }
 
 unload_model :: proc(model: ^Model) {
-	// TODO: Implement model unloading. Store all dynamic arrays in a separate
-	// model-specific memory arena and clear all of them at once.
-	// Don't forget manually clear up opengl resources though.
+	for &mesh in model.meshes {
+		for &primitive in mesh.primitives {
+			if primitive.vao != 0 {
+				gl.DeleteVertexArrays(1, &primitive.vao)
+				primitive.vao = 0
+			}
+			if primitive.vbo != 0 {
+				gl.DeleteBuffers(1, &primitive.vbo)
+				primitive.vbo = 0
+			}
+			if primitive.ebo != 0 {
+				gl.DeleteBuffers(1, &primitive.ebo)
+				primitive.ebo = 0
+			}
+		}
+	}
+
+	for &skin in model.skins {
+		if skin.ssbo != 0 {
+			gl.DeleteBuffers(1, &skin.ssbo)
+			skin.ssbo = 0
+		}
+	}
+
+	vmem.arena_destroy(&model.arena)
 }
 
 draw_model :: proc(model: ^Model, mat: glm.mat4 = glm.mat4(1.0)) {
@@ -869,6 +881,8 @@ main :: proc() {
 	}
 
 	unload_model(&model)
+	gl.DeleteProgram(shader)
 	glfw.DestroyWindow(window)
+	glfw.Terminate()
 }
 
